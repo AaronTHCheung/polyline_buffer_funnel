@@ -1,0 +1,3 @@
+# Python 3.12
+triangle==20250106
+matplotlib==3.11.0
