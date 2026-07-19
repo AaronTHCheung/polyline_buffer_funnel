@@ -37,16 +37,17 @@ def point_line_distance(pt: Point, line_start: Point, line_end: Point) -> float:
         (line_end.x - line_start.x) * pt.y + 
         line_end.x * line_start.y - 
         line_end.y * line_start.x
-    )
-    return numerator / line_mag
+    )  # cross product, and the absolute operator extracts just the area of the parallelogram
+
+    return numerator / line_mag  # dividing the parallelogram area by the base length gives the height, which is the distance between the point to the line
 
 def calculate_tangent_angle(apex: Point, center: Point, radius: float, is_left: bool) -> float:
     dist = distance(apex, center)
     if dist <= radius:
-        return math.atan2(apex.y - center.y, apex.x - center.x)
+        return math.atan2(apex.y - center.y, apex.x - center.x)  # the vector points from the center to the apex - a safety measure to drives the apex away from the circle
 
     theta = math.atan2(center.y - apex.y, center.x - apex.x)
-    phi = math.asin(radius / dist)
+    phi = math.asin(radius / dist)  # the angle offset from theta that will graze the circle's edge
     
     # Left obstacles require tangent on their right side (-phi)
     # Right obstacles require tangent on their left side (+phi)
@@ -97,6 +98,67 @@ def generate_arc_points(center: Point, radius: float, angle_in: float, angle_out
         ))
     return points
 
+def visualize_arc_points_with_arrows(center: Point, radius: float, points: List[Point]):
+    """
+    Plots the clearance circle and the arc path with directional arrows to confirm CCW motion.
+    """
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    # 1. Plot the clearance circle
+    circle = plt.Circle((center.x, center.y), radius, color='red', fill=False, linestyle='--', label='Clearance Circle')
+    ax.add_patch(circle)
+    
+    # 2. Extract coordinates
+    x = np.array([p.x for p in points])
+    y = np.array([p.y for p in points])
+    
+    # 3. Plot the line path
+    ax.plot(x, y, color='blue', marker='o', label='Discretized Arc')
+    
+    # 4. FIX: Add directional arrows
+    # Calculate the direction of the path segments
+    dx = np.diff(x)
+    dy = np.diff(y)
+    
+    # Use quiver to plot arrows at the midpoint of each segment
+    mid_x = (x[:-1] + x[1:]) / 2
+    mid_y = (y[:-1] + y[1:]) / 2
+    
+    # quiver(X, Y, U, V)
+    ax.quiver(mid_x, mid_y, dx, dy, color='blue', angles='xy', scale_units='xy', scale=1, width=0.005)
+    
+    # Formatting
+    ax.plot(center.x, center.y, marker='x', color='black', label='Center')
+    ax.set_aspect('equal', 'box')
+    ax.grid(True, linestyle=':', alpha=0.6)
+    ax.legend(loc='upper right')
+    plt.title("Arc Discretization (Arrows indicate Direction)")
+    
+    # Margin
+    margin = radius * 1.5
+    ax.set_xlim(center.x - margin, center.x + margin)
+    ax.set_ylim(center.y - margin, center.y + margin)
+    
+    plt.show()
+
+if False:
+    center_pt = Point(0, 0)
+    clearance_radius = 5.0
+
+    # Example: 180-degree counter-clockwise turn starting from the bottom
+    # Step is set large (0.5 rad = ~28 deg) to make r_safe inflation obvious
+    generated_points = generate_arc_points(
+        center=center_pt,
+        radius=clearance_radius,
+        angle_in=math.pi/2,  
+        angle_out=0,   
+        is_left=True,           
+        step=0.5                 
+    )
+
+    # visualize_arc_points(center_pt, clearance_radius, generated_points)
+    visualize_arc_points_with_arrows(center_pt, clearance_radius, generated_points)
+     
 def calculate_centroid(polygon: Polygon) -> Point:
     x_coords = [p.x for p in polygon]
     y_coords = [p.y for p in polygon]
@@ -186,11 +248,11 @@ def modified_funnel(portals: List[Portal], start: Point, end: Point, radius: flo
         return [start, end]
 
     smoothed_path = [start]
-    
+
     apex = start
     left_vertex = portals[0].left
     right_vertex = portals[0].right
-    
+
     left_index = 0
     right_index = 0
 
@@ -198,6 +260,68 @@ def modified_funnel(portals: List[Portal], start: Point, end: Point, radius: flo
     while i < len(portals):
         new_left = portals[i].left
         new_right = portals[i].right
+
+        if new_left == end and new_right == end:
+            end_angle = math.atan2(end.y - apex.y, end.x - apex.x)
+
+            # Check if direct line to end breaks the left bound
+            if apex != left_vertex:
+                current_left_angle = calculate_tangent_angle(apex, left_vertex, radius, is_left=True)
+                if angle_diff(end_angle, current_left_angle) > 0.0:
+                    Tin = get_tangent_point(apex, left_vertex, radius, is_left=True)
+                    smoothed_path.append(Tin)
+                    
+                    angle_in = math.atan2(Tin.y - left_vertex.y, Tin.x - left_vertex.x)
+                    dist_to_next = distance(left_vertex, end)
+                    
+                    if dist_to_next > radius:
+                        theta = math.atan2(end.y - left_vertex.y, end.x - left_vertex.x)
+                        # Asymmetric bitangent from r to 0
+                        angle_out = theta - math.acos(radius / dist_to_next)
+                        arc_pts = generate_arc_points(left_vertex, radius, angle_in, angle_out, is_left=True)
+                        smoothed_path.extend(arc_pts)
+                        apex = arc_pts[-1]
+                    else:
+                        apex = Tin
+                    
+                    left_vertex = apex
+                    right_vertex = apex
+                    apex_index = left_index
+                    left_index = apex_index
+                    right_index = apex_index
+                    i = apex_index + 1
+                    continue
+            
+            # Check if direct line to end breaks the right bound
+            if apex != right_vertex:
+                current_right_angle = calculate_tangent_angle(apex, right_vertex, radius, is_left=False)
+                if angle_diff(end_angle, current_right_angle) < 0.0:
+                    Tin = get_tangent_point(apex, right_vertex, radius, is_left=False)
+                    smoothed_path.append(Tin)
+                    
+                    angle_in = math.atan2(Tin.y - right_vertex.y, Tin.x - right_vertex.x)
+                    dist_to_next = distance(right_vertex, end)
+                    
+                    if dist_to_next > radius:
+                        theta = math.atan2(end.y - right_vertex.y, end.x - right_vertex.x)
+                        # Asymmetric bitangent from r to 0
+                        angle_out = theta + math.acos(radius / dist_to_next)
+                        arc_pts = generate_arc_points(right_vertex, radius, angle_in, angle_out, is_left=False)
+                        smoothed_path.extend(arc_pts)
+                        apex = arc_pts[-1]
+                    else:
+                        apex = Tin
+                        
+                    left_vertex = apex
+                    right_vertex = apex
+                    apex_index = right_index
+                    left_index = apex_index
+                    right_index = apex_index
+                    i = apex_index + 1
+                    continue
+            
+            # Direct path is clear; break loop and append end coordinate
+            break
 
         # -------------------------------------------------------------------
         # 1. Update Right Vertex
@@ -208,35 +332,35 @@ def modified_funnel(portals: List[Portal], start: Point, end: Point, radius: flo
         else:
             new_right_angle = calculate_tangent_angle(apex, new_right, radius, is_left=False)
             current_right_angle = calculate_tangent_angle(apex, right_vertex, radius, is_left=False)
-            
+
             if angle_diff(new_right_angle, current_right_angle) >= 0.0:
                 if apex == left_vertex:
                     right_vertex = new_right
                     right_index = i
                 else:
                     current_left_angle = calculate_tangent_angle(apex, left_vertex, radius, is_left=True)
-                    
+
                     if angle_diff(new_right_angle, current_left_angle) > 0.0:
                         Tin = get_tangent_point(apex, left_vertex, radius, is_left=True)
                         smoothed_path.append(Tin)
-                        
+
                         angle_in = math.atan2(Tin.y - left_vertex.y, Tin.x - left_vertex.x)
                         dist_to_next = distance(left_vertex, new_right)
-                        
+
                         if dist_to_next > radius:
                             theta = math.atan2(new_right.y - left_vertex.y, new_right.x - left_vertex.x)
                             phi = math.asin(radius / dist_to_next)
                             angle_out = theta - phi
-                            
+
                             arc_pts = generate_arc_points(left_vertex, radius, angle_in, angle_out, is_left=True)
                             smoothed_path.extend(arc_pts)
                             apex = arc_pts[-1]
                         else:
                             apex = Tin
-                            
+
                         left_vertex = apex
                         right_vertex = apex
-                        
+
                         apex_index = left_index
                         left_index = apex_index
                         right_index = apex_index
@@ -255,35 +379,35 @@ def modified_funnel(portals: List[Portal], start: Point, end: Point, radius: flo
         else:
             new_left_angle = calculate_tangent_angle(apex, new_left, radius, is_left=True)
             current_left_angle = calculate_tangent_angle(apex, left_vertex, radius, is_left=True)
-            
+
             if angle_diff(new_left_angle, current_left_angle) <= 0.0:
                 if apex == right_vertex:
                     left_vertex = new_left
                     left_index = i
                 else:
                     current_right_angle = calculate_tangent_angle(apex, right_vertex, radius, is_left=False)
-                    
+
                     if angle_diff(new_left_angle, current_right_angle) < 0.0:
                         Tin = get_tangent_point(apex, right_vertex, radius, is_left=False)
                         smoothed_path.append(Tin)
-                        
+
                         angle_in = math.atan2(Tin.y - right_vertex.y, Tin.x - right_vertex.x)
                         dist_to_next = distance(right_vertex, new_left)
-                        
+
                         if dist_to_next > radius:
                             theta = math.atan2(new_left.y - right_vertex.y, new_left.x - right_vertex.x)
                             phi = math.asin(radius / dist_to_next)
                             angle_out = theta + phi
-                            
+
                             arc_pts = generate_arc_points(right_vertex, radius, angle_in, angle_out, is_left=False)
                             smoothed_path.extend(arc_pts)
                             apex = arc_pts[-1]
                         else:
                             apex = Tin
-                            
+
                         left_vertex = apex
                         right_vertex = apex
-                        
+
                         apex_index = right_index
                         left_index = apex_index
                         right_index = apex_index
@@ -296,7 +420,7 @@ def modified_funnel(portals: List[Portal], start: Point, end: Point, radius: flo
         i += 1
 
     smoothed_path.append(end)
-    return smoothed_path
+    return [*smoothed_path[:-2], smoothed_path[-1]]
 
 
 # ---------------------------------------------------------------------------
